@@ -29,6 +29,7 @@
 #include "llvm/IR/InstIterator.h"
 #include "llvm/Analysis/LoopInfo.h"
 //#include "llvm/Analysis/Dominators.h"
+#include "Analyzer.h"
 
 
 namespace llvm {
@@ -215,12 +216,14 @@ public:
     llvm::DenseMapInfo<std::array<llvm::Instruction*, ContextSize>>;
   using AllResults = llvm::DenseMap<Context, ContextResults, ContextMapInfo>;
 
+       std::unordered_map<CallInst*, std::unordered_set<Function*>> SMLTAMap;
 
   ForwardDataflowAnalysis(llvm::Module& m,
                           llvm::ArrayRef<llvm::Function*> entryPoints) {
     for (auto* entry : entryPoints) {
       contextWork.add({Context{}, entry});
     }
+    SMLTAMap = SMLTAnalysis(&m);
   }
 
 
@@ -285,9 +288,9 @@ public:
 
       // Propagate through all instructions in the block
       for (auto& i : *bb) {
-        llvm::CallSite cs(&i);
-        if (isAnalyzableCall(cs)) {
-          analyzeCall(cs, state, context);
+        llvm::CallBase *cb = dyn_cast<CallBase>(&i);
+        if (isAnalyzableCall(cb)) {
+          analyzeCall(cb, state, context);
         } else {
           applyTransfer(i, state);
         }
@@ -336,60 +339,86 @@ public:
     return results;
   }
 
-  llvm::Function*
-  getCalledFunction(llvm::CallSite cs) {
-    auto* calledValue = cs.getCalledValue()->stripPointerCasts();
+  std::unordered_set<Function*>
+  getCalledFunction(llvm::CallBase *cb) {
+    std::unordered_set<Function*> FuncSet;
     // Currently we do not handle indirect calls but apply transfer directly.
     // To keep soundness, we classify variables in this case as unsafe later in value range analysis
-    return llvm::dyn_cast<llvm::Function>(calledValue);
+
+    if (cb->isIndirectCall()) {
+      // query SMLTAMap to get callee(s)
+      if (CallInst *CI = dyn_cast<CallInst>(cb)) {
+        FuncSet = SMLTAMap[CI];
+      }
+      else {
+        // an indirect call but not CallInst
+      }
+    }
+    else {
+      // directly get callee
+      Function *callee = cb->getCalledFunction();
+      FuncSet.insert(callee);
+    }
+
+    return FuncSet;
   }
 
   bool
-  isAnalyzableCall(llvm::CallSite cs) {
-    if (!cs.getInstruction()) {
+  isAnalyzableCall(llvm::CallBase *cb) {
+    if (!cb) {
       return false;
     }
-    auto* called = getCalledFunction(cs);
-    return called && !called->isDeclaration();
+    std::unordered_set<Function*> calledSet = getCalledFunction(cb);
+    for (auto* called : calledSet) {
+      if (called && !called->isDeclaration()) {
+        return true;
+      }
+    }
+    return false;
   }
 
   void
-  analyzeCall(llvm::CallSite cs, State &state, const Context& context) {
-    Context newContext;
-    if (newContext.size() > 0) {
-      std::copy(context.begin() + 1, context.end(), newContext.begin());
-      newContext.back() = cs.getInstruction();
-    }
-
-    auto* caller  = cs.getInstruction()->getFunction();
-    auto* callee  = getCalledFunction(cs);
-    auto toCall   = std::make_pair(newContext, callee);
-    auto toUpdate = std::make_pair(context, caller);
-
-    auto& calledState  = allResults[newContext][callee];
-    auto& summaryState = calledState[callee];
-    bool needsUpdate   = summaryState.size() == 0;
-    unsigned index = 0;
-    for (auto& functionArg : callee->args()) {
-      auto* passedConcrete = cs.getArgument(index);
-      auto passedAbstract = state.find(passedConcrete);
-      if (passedAbstract == state.end()) {
-        transfer(*passedConcrete, state);
-        passedAbstract = state.find(passedConcrete);
+  analyzeCall(llvm::CallBase *cb, State &state, const Context& context) {
+    auto* caller  = cb->getFunction();
+    std::unordered_set<Function*> calleeSet  = getCalledFunction(cb);
+    for (auto* callee : calleeSet) {
+      if (!callee || callee->isDeclaration()) {
+        continue;
       }
-      auto& arg     = summaryState[&functionArg];
-      auto newState = meet({passedAbstract->second, arg});
-      needsUpdate |= !(newState == arg);
-      arg = newState;
-      ++index;
-    }
 
-    if (!active.count(toCall) && needsUpdate) {
-      computeForwardDataflow(*callee, newContext);
-    }
+      Context newContext;
+      if (newContext.size() > 0) {
+        std::copy(context.begin() + 1, context.end(), newContext.begin());
+        newContext.back() = cb;
+      }
+      auto toCall   = std::make_pair(newContext, callee);
+      auto toUpdate = std::make_pair(context, caller);
 
-    state[cs.getInstruction()] = calledState[callee][callee];
-    callers[toCall].insert(toUpdate);
+      auto& calledState  = allResults[newContext][callee];
+      auto& summaryState = calledState[callee];
+      bool needsUpdate   = summaryState.size() == 0;
+      unsigned index = 0;
+      for (auto& functionArg : callee->args()) {
+        auto* passedConcrete = cb->getArgOperand(index);
+        auto passedAbstract = state.find(passedConcrete);
+        if (passedAbstract == state.end()) {
+          transfer(*passedConcrete, state);
+          passedAbstract = state.find(passedConcrete);
+        }
+        auto& arg     = summaryState[&functionArg];
+        auto newState = meet({passedAbstract->second, arg});
+        needsUpdate |= !(newState == arg);
+        arg = newState;
+        ++index;
+      }
+
+      if (!active.count(toCall) && needsUpdate) {
+        computeForwardDataflow(*callee, newContext);
+      }
+
+      state[cb] = allResults[newContext][callee][callee][callee];
+      callers[toCall].insert(toUpdate);
+    }
   }
 
 private:

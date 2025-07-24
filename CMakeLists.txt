@@ -43,6 +43,7 @@ add_compile_options(-std=c++17)
 
 include_directories("${CMAKE_SOURCE_DIR}/program-dependence-graph/SVF/include")
 include_directories("${CMAKE_SOURCE_DIR}/program-dependence-graph/include")
+include_directories("${CMAKE_SOURCE_DIR}/PtrClassification/DeepType/src/lib")
 
 # Compiler flag
 set(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -fno-rtti")
@@ -69,6 +70,7 @@ add_library(UnifiedMemSafe SHARED
 
 target_link_libraries(UnifiedMemSafe PUBLIC "${CMAKE_SOURCE_DIR}/program-dependence-graph/build/libpdg_shared.a")
 target_link_libraries(UnifiedMemSafe PUBLIC "${CMAKE_SOURCE_DIR}/program-dependence-graph/SVF/Release-build/lib/libSvf.a")
+target_link_libraries(UnifiedMemSafe PUBLIC "${CMAKE_SOURCE_DIR}/PtrClassification/DeepType/build/lib/libdeeptype.a")
 
 
 
